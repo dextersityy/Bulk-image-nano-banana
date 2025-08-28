@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Page, ApiKey, ApiKeyStatus, HistoryItem, GenerationResult } from './types';
+import { Page, ApiKey, ApiKeyStatus, HistoryItem, GenerationResult, AIService } from './types';
 import { GeneratorPage } from './components/GeneratorPage';
 import { HistoryPage } from './components/HistoryPage';
 import { Icon } from './components/Icons';
@@ -18,7 +18,7 @@ const Header: React.FC<{ currentPage: Page; onPageChange: (page: Page) => void }
         <div className="w-8 h-8 bg-gradient-to-tr from-cyan-500 to-blue-600 rounded-full flex items-center justify-center">
             <Icon name="generate" className="w-5 h-5 text-white"/>
         </div>
-        <h1 className="text-xl font-bold text-white">Gemini Bulk Image Generator</h1>
+        <h1 className="text-xl font-bold text-white">Multi-AI Image Generator</h1>
       </div>
       <nav className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg p-1">
         <button 
@@ -48,7 +48,12 @@ function App() {
     try {
       const storedKeys = localStorage.getItem(API_KEYS_STORAGE_KEY);
       if (storedKeys) {
-        setApiKeys(JSON.parse(storedKeys));
+        // Add backward compatibility for old keys without a `service` property
+        const parsedKeys = JSON.parse(storedKeys).map((k: any) => ({
+            ...k,
+            service: k.service || AIService.Gemini, // Default to Gemini
+        }));
+        setApiKeys(parsedKeys);
       }
       setHistory(loadHistory());
     } catch (error) {
@@ -61,9 +66,9 @@ function App() {
     localStorage.setItem(API_KEYS_STORAGE_KEY, JSON.stringify(newKeys));
   };
 
-  const addApiKey = (key: string) => {
+  const addApiKey = (key: string, service: AIService) => {
     if (!apiKeys.some(k => k.key === key)) {
-      updateApiKeys([...apiKeys, { key, status: ApiKeyStatus.Active }]);
+      updateApiKeys([...apiKeys, { key, status: ApiKeyStatus.Active, service }]);
     }
   };
 

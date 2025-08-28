@@ -1,11 +1,11 @@
-import React, { useState, useCallback, useRef } from 'react';
-import { ApiKey, ApiKeyStatus, GenerationResult } from '../types';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { ApiKey, ApiKeyStatus, GenerationResult, AIService } from '../types';
 import { generateImages, isRateLimitError, createAndDownloadZip, downloadSingleImage, getErrorMessage, isPromptError } from '../services/apiService';
 import { Icon } from './Icons';
 
 interface GeneratorPageProps {
   apiKeys: ApiKey[];
-  addApiKey: (key: string) => void;
+  addApiKey: (key: string, service: AIService) => void;
   removeApiKey: (key: string) => void;
   updateApiKeyStatus: (key: string, status: ApiKeyStatus) => void;
   onGenerationUpdate: (sessionId: string, results: GenerationResult[]) => void;
@@ -13,10 +13,11 @@ interface GeneratorPageProps {
 
 const ApiKeyManager: React.FC<Omit<GeneratorPageProps, 'onGenerationUpdate'>> = ({ apiKeys, addApiKey, removeApiKey, updateApiKeyStatus }) => {
   const [newApiKey, setNewApiKey] = useState('');
+  const [selectedService, setSelectedService] = useState<AIService>(AIService.Gemini);
 
   const handleAddKey = () => {
     if (newApiKey.trim()) {
-      addApiKey(newApiKey.trim());
+      addApiKey(newApiKey.trim(), selectedService);
       setNewApiKey('');
     }
   };
@@ -37,20 +38,30 @@ const ApiKeyManager: React.FC<Omit<GeneratorPageProps, 'onGenerationUpdate'>> = 
           type="password"
           value={newApiKey}
           onChange={(e) => setNewApiKey(e.target.value)}
-          placeholder="Enter new Gemini API Key"
+          placeholder="Enter new API Key"
           className="flex-grow bg-gray-900 text-gray-300 border border-gray-700 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none"
         />
+        <select value={selectedService} onChange={e => setSelectedService(e.target.value as AIService)} className="bg-gray-900 text-gray-300 border border-gray-700 rounded-md px-2 py-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none">
+          <option value={AIService.Gemini}>Gemini</option>
+          <option value={AIService.OpenAI}>OpenAI</option>
+        </select>
         <button
           onClick={handleAddKey}
           className="bg-cyan-600 text-white px-4 py-2 rounded-md hover:bg-cyan-700 transition-colors flex items-center gap-2 text-sm"
+          title={`Add ${selectedService} Key`}
         >
-          <Icon name="add" className="w-4 h-4" /> Add
+          <Icon name="add" className="w-4 h-4" />
         </button>
       </div>
-      <div className="space-y-2">
-        {apiKeys.map(({ key, status }) => (
+      <div className="space-y-2 max-h-48 overflow-y-auto pr-2">
+        {apiKeys.map(({ key, status, service }) => (
           <div key={key} className="flex items-center justify-between bg-gray-700 p-2 rounded-md text-sm">
-            <span className="font-mono text-gray-400">...{key.slice(-6)}</span>
+            <div className="flex items-center gap-2">
+              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${service === AIService.Gemini ? 'bg-blue-500/30 text-blue-300' : 'bg-green-500/30 text-green-300'}`}>
+                {service}
+              </span>
+              <span className="font-mono text-gray-400">...{key.slice(-6)}</span>
+            </div>
             <div className="flex items-center gap-3">
               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${status === ApiKeyStatus.Active ? 'bg-green-500/20 text-green-300' : 'bg-yellow-500/20 text-yellow-300'}`}>
                 {status}
@@ -77,16 +88,24 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
   const [statusMessage, setStatusMessage] = useState('');
   const [results, setResults] = useState<GenerationResult[]>([]);
   const [currentKeyIndex, setCurrentKeyIndex] = useState(0);
+  const [selectedService, setSelectedService] = useState<AIService>(AIService.Gemini);
   const stopRequest = useRef(false);
+
+  useEffect(() => {
+    // DALL-E 3 only generates 1 image per prompt.
+    if (selectedService === AIService.OpenAI) {
+      setNumImages(1);
+    }
+  }, [selectedService]);
 
   const handleGenerate = useCallback(async () => {
     if (!prompts.trim()) {
       alert('Please enter at least one prompt.');
       return;
     }
-    const initialActiveKeys = apiKeys.filter(k => k.status === ApiKeyStatus.Active);
+    const initialActiveKeys = apiKeys.filter(k => k.status === ApiKeyStatus.Active && k.service === selectedService);
     if (initialActiveKeys.length === 0) {
-      alert('Please add at least one active API key.');
+      alert(`Please add at least one active API key for ${selectedService}.`);
       return;
     }
 
@@ -113,12 +132,12 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
         
         setStatusMessage(`Processing prompt ${i + 1} of ${promptsToProcess.length}: "${prompt}"`);
 
-        const activeKeysForPrompt = apiKeys.filter(k => k.status === ApiKeyStatus.Active);
+        const activeKeysForPrompt = apiKeys.filter(k => k.status === ApiKeyStatus.Active && k.service === selectedService);
 
         while (!success && attempts < activeKeysForPrompt.length) {
             if (stopRequest.current) break;
 
-            const currentActiveKeys = apiKeys.filter(k => k.status === ApiKeyStatus.Active);
+            const currentActiveKeys = apiKeys.filter(k => k.status === ApiKeyStatus.Active && k.service === selectedService);
             if (currentActiveKeys.length === 0) {
                 promptResult = { prompt, images: [], error: 'All available keys are rate-limited.' };
                 break;
@@ -129,33 +148,27 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
             setStatusMessage(`[Prompt ${i + 1}/${promptsToProcess.length}] Trying key ...${apiKey.key.slice(-6)}`);
             
             try {
-                const generatedImages = await generateImages(prompt, apiKey.key, numImages);
+                const generatedImages = await generateImages(prompt, apiKey.key, numImages, selectedService);
                 promptResult = { prompt, images: generatedImages };
                 success = true;
                 setCurrentKeyIndex(keyIdx); 
             } catch (error: any) {
-                // Use JSON.stringify to prevent '[object Object]' in console for raw API errors
                 console.error(`API key ...${apiKey.key.slice(-6)} failed:`, error instanceof Error ? error : JSON.stringify(error, null, 2));
 
                 if (isPromptError(error)) {
-                    // This is a prompt-specific error, so we should stop trying other keys for it.
                     promptResult = { prompt, images: [], error: getErrorMessage(error) };
-                    break;
+                    break; // Stop trying other keys for a bad prompt.
                 }
 
                 if (isRateLimitError(error)) {
                     updateApiKeyStatus(apiKey.key, ApiKeyStatus.RateLimited);
-                    setStatusMessage(`Key ...${apiKey.key.slice(-6)} rate limited. Cooling down for 2s...`);
+                    setStatusMessage(`Key ...${apiKey.key.slice(-6)} rate limited. Cooling down...`);
                     if (!stopRequest.current) await new Promise(resolve => setTimeout(resolve, 2000));
                 } else {
-                    // For other errors (invalid key, server issues), mark the key and move to the next.
-                    updateApiKeyStatus(apiKey.key, ApiKeyStatus.RateLimited);
-                    const errorMessage = getErrorMessage(error);
+                    updateApiKeyStatus(apiKey.key, ApiKeyStatus.RateLimited); // Also mark invalid keys as rate limited to avoid re-use in this run
                     setStatusMessage(`Key ...${apiKey.key.slice(-6)} failed. Trying next key.`);
-                    console.warn(`Error for key ...${apiKey.key.slice(-6)}: ${errorMessage}`);
                 }
                 
-                // For key-related errors, we increment attempts to try the next available key.
                 attempts++;
                 keyIdx++;
             }
@@ -163,7 +176,7 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
         if (stopRequest.current) break;
 
         if (!success && !promptResult) {
-            promptResult = { prompt, images: [], error: 'All active API keys failed or are rate limited.' };
+            promptResult = { prompt, images: [], error: `All active ${selectedService} keys failed or are rate limited.` };
         }
 
         if (promptResult) {
@@ -179,7 +192,7 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
         setStatusMessage('All prompts processed.');
     }
     setIsLoading(false);
-  }, [prompts, apiKeys, numImages, currentKeyIndex, onGenerationUpdate, updateApiKeyStatus]);
+  }, [prompts, apiKeys, numImages, currentKeyIndex, onGenerationUpdate, updateApiKeyStatus, selectedService]);
   
   const downloadAllAsZip = () => {
     const allImages: {name: string; base64: string}[] = [];
@@ -192,7 +205,7 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
         });
     });
     if (allImages.length > 0) {
-        createAndDownloadZip(allImages, 'gemini-bulk-generation-session');
+        createAndDownloadZip(allImages, 'bulk-generation-session');
     }
   }
 
@@ -200,12 +213,31 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
     stopRequest.current = true;
     setStatusMessage("Stopping generation...");
   };
+  
+  const ServiceButton: React.FC<{service: AIService, children: React.ReactNode}> = ({ service, children }) => (
+      <button 
+        onClick={() => setSelectedService(service)} 
+        disabled={isLoading}
+        className={`px-4 py-2 text-sm font-semibold rounded-md transition-colors w-full disabled:cursor-not-allowed ${selectedService === service ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+      >
+        {children}
+      </button>
+  );
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 p-4 md:p-8">
       {/* --- CONTROLS --- */}
       <div className="lg:col-span-1 flex flex-col gap-6">
         <h2 className="text-3xl font-bold text-white">Generation Settings</h2>
+
+        <div className="bg-gray-800 p-4 rounded-lg">
+            <label className="block text-lg font-semibold text-white mb-3">AI Service</label>
+            <div className="grid grid-cols-2 gap-2">
+                <ServiceButton service={AIService.Gemini}>Google Gemini</ServiceButton>
+                <ServiceButton service={AIService.OpenAI}>OpenAI DALL-E 3</ServiceButton>
+            </div>
+        </div>
+
         <ApiKeyManager apiKeys={apiKeys} addApiKey={addApiKey} removeApiKey={removeApiKey} updateApiKeyStatus={updateApiKeyStatus} />
         
         <div className="bg-gray-800 p-4 rounded-lg">
@@ -224,6 +256,7 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
 
         <div className="bg-gray-800 p-4 rounded-lg">
           <label htmlFor="numImages" className="block text-lg font-semibold text-white mb-2">Images per Prompt</label>
+           {selectedService === AIService.OpenAI && <p className="text-xs text-gray-400 mb-2 -mt-1">DALL-E 3 generates 1 image per prompt.</p>}
           <div className="flex items-center gap-4">
             <input
               type="range"
@@ -232,8 +265,8 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
               max="4"
               value={numImages}
               onChange={(e) => setNumImages(parseInt(e.target.value, 10))}
-              className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
-              disabled={isLoading}
+              className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer disabled:bg-gray-600"
+              disabled={isLoading || selectedService === AIService.OpenAI}
             />
             <span className="text-xl font-bold text-cyan-400 w-8 text-center">{numImages}</span>
           </div>
@@ -269,7 +302,7 @@ export const GeneratorPage: React.FC<GeneratorPageProps> = ({ apiKeys, addApiKey
         {isLoading && results.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center bg-gray-800/50 rounded-lg p-8">
             <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-cyan-400"></div>
-            <p className="text-white text-lg mt-4">Starting Generation...</p>
+            <p className="text-white text-lg mt-4">Starting Generation with {selectedService}...</p>
             <p className="text-gray-400 text-sm mt-2 text-center">{statusMessage}</p>
           </div>
         )}

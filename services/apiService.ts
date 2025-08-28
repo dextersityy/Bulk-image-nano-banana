@@ -3,18 +3,17 @@
 declare var JSZip: any;
 declare var saveAs: any;
 
-import { GenerationResult, HistoryItem } from '../types';
+import { GenerationResult, HistoryItem, AIService } from '../types';
 
 const HISTORY_KEY = 'gemini-image-generator-history';
 
 /**
  * Extracts a user-friendly error message from various error formats.
- * This is updated to provide more detail for unexpected error structures.
+ * This is updated to provide more detail for unexpected error structures from both Gemini and OpenAI.
  */
 export function getErrorMessage(error: any): string {
   if (!error) return 'An unknown error occurred.';
 
-  // Gemini API error structure from fetch: { error: { message: "..." } }
   const errorDetails = error.error || error;
   if (typeof errorDetails === 'object' && !Array.isArray(errorDetails) && errorDetails.message) {
       return errorDetails.message;
@@ -24,10 +23,9 @@ export function getErrorMessage(error: any): string {
     return error;
   }
   
-  // As a fallback, try to stringify the error object for the UI.
   try {
     const stringifiedError = JSON.stringify(error);
-    if (stringifiedError !== '{}') { // Avoid returning an empty object string
+    if (stringifiedError !== '{}') {
         return stringifiedError;
     }
   } catch (e) {
@@ -40,13 +38,16 @@ export function getErrorMessage(error: any): string {
 
 /**
  * Checks if an error object indicates a rate limit error from the API.
- * This is updated to handle the raw fetch JSON error object.
  */
 function isRateLimitError(error: any): boolean {
   if (!error) return false;
 
   const details = error.error || error; 
   if (details?.status === 'RESOURCE_EXHAUSTED' || details?.code === 429) {
+    return true;
+  }
+  
+  if (details?.code === 'rate_limit_exceeded') { // OpenAI specific
     return true;
   }
 
@@ -60,21 +61,16 @@ function isRateLimitError(error: any): boolean {
  */
 export function isPromptError(error: any): boolean {
   const message = getErrorMessage(error).toLowerCase();
-  return message.includes('prompt is not allowed') || message.includes('prompt was blocked');
+  // Gemini: "prompt is not allowed", "prompt was blocked"
+  // OpenAI: "your request was rejected as a result of our safety system"
+  return message.includes('prompt') || message.includes('safety');
 }
 
-
 /**
- * Generates a set of images for a single prompt using a direct `fetch` call to the Gemini REST API.
- * This bypasses the @google/genai SDK to ensure the correct API key is always used via the `x-goog-api-key` header.
+ * Generates images using the Google Gemini API.
  */
-export async function generateImages(prompt: string, apiKey: string, numImages: number): Promise<string[]> {
-  if (!apiKey || apiKey.trim() === '') {
-    throw new Error('A valid API key must be provided to generate images.');
-  }
-
+async function generateImagesGemini(prompt: string, apiKey: string, numImages: number): Promise<string[]> {
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:generateImages';
-
   const payload = {
     prompt: prompt,
     config: {
@@ -84,38 +80,92 @@ export async function generateImages(prompt: string, apiKey: string, numImages: 
     },
   };
 
-  try {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+    body: JSON.stringify(payload),
+    credentials: 'omit',
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('Gemini API Error Response:', data);
+    throw data;
+  }
+  
+  if (!data.generatedImages || !Array.isArray(data.generatedImages)) {
+    console.error('Invalid Gemini success response format:', data);
+    throw new Error("Invalid response format from Gemini. Expected 'generatedImages' array.");
+  }
+
+  return data.generatedImages.map((img: any) => img.image.imageBytes);
+}
+
+/**
+ * Generates an image using the OpenAI DALL-E 3 API.
+ * Note: DALL-E 3 API generates one image at a time.
+ */
+async function generateImagesOpenAI(prompt: string, apiKey: string): Promise<string[]> {
+    const url = 'https://api.openai.com/v1/images/generations';
+    const payload = {
+        model: "dall-e-3",
+        prompt: prompt,
+        n: 1,
+        size: "1024x1024",
+        response_format: "b64_json",
+    };
+
     const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify(payload),
-      credentials: 'omit', // Prevent browser from sending auth cookies/headers, forcing use of api-key
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      console.error('Gemini API Error Response:', data);
-      throw data; // Throw the JSON error object for parsing by the UI
-    }
-    
-    if (!data.generatedImages || !Array.isArray(data.generatedImages)) {
-      console.error('Invalid success response format:', data);
-      throw new Error("Invalid response format from API. Expected 'generatedImages' array.");
+        console.error('OpenAI API Error Response:', data);
+        throw data;
     }
 
-    return data.generatedImages.map((img: any) => img.image.imageBytes);
+    if (!data.data || !Array.isArray(data.data) || !data.data[0]?.b64_json) {
+        console.error('Invalid OpenAI success response format:', data);
+        throw new Error("Invalid response format from OpenAI. Expected 'data' array with 'b64_json'.");
+    }
 
+    return [data.data[0].b64_json];
+}
+
+/**
+ * Main dispatcher function to generate images from the selected AI service.
+ */
+export async function generateImages(prompt: string, apiKey: string, numImages: number, service: AIService): Promise<string[]> {
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error('A valid API key must be provided.');
+  }
+
+  try {
+    switch (service) {
+      case AIService.Gemini:
+        return await generateImagesGemini(prompt, apiKey, numImages);
+      case AIService.OpenAI:
+        // DALL-E 3 only supports 1 image at a time, so numImages is ignored.
+        return await generateImagesOpenAI(prompt, apiKey);
+      default:
+        throw new Error(`Unsupported AI service: ${service}`);
+    }
   } catch (error) {
-    // If fetch fails (network error) or if response isn't JSON, it won't have the 'error' property
     if (error instanceof Error && !('error' in (error as object))) {
-        console.error('Fetch/Network Error:', error);
-        throw new Error(`Failed to call the Gemini API. Please check your network connection or console for details.`);
+        console.error(`${service} Fetch/Network Error:`, error);
+        throw new Error(`Failed to call the ${service} API. Please check your network connection or console for details.`);
     }
-    // Re-throw API errors to be handled by the UI logic
     throw error;
   }
 }
@@ -170,7 +220,6 @@ export function saveHistory(history: HistoryItem[]): void {
 
 /**
  * Creates a new history item or updates an existing one for a given session.
- * This is used to save progress incrementally.
  */
 export function updateHistory(sessionId: string, newResults: GenerationResult[]): HistoryItem[] {
     const currentHistory = loadHistory();
@@ -178,11 +227,9 @@ export function updateHistory(sessionId: string, newResults: GenerationResult[])
     let updatedHistory;
 
     if (itemIndex > -1) {
-        // Update existing item in the history array
         updatedHistory = [...currentHistory];
         updatedHistory[itemIndex].results = newResults;
     } else {
-        // Create a new history item
         const newItem: HistoryItem = {
             id: sessionId,
             date: new Date().toLocaleString(),

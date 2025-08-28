@@ -3,9 +3,15 @@ export enum ApiKeyStatus {
   RateLimited = 'Rate Limited',
 }
 
+export enum AIService {
+  Gemini = 'Gemini',
+  OpenAI = 'OpenAI',
+}
+
 export interface ApiKey {
   key: string;
   status: ApiKeyStatus;
+  service: AIService;
 }
 
 export interface GenerationResult {
