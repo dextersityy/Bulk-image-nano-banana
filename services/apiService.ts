@@ -3,40 +3,121 @@
 declare var JSZip: any;
 declare var saveAs: any;
 
-import { GoogleGenAI } from "@google/genai";
 import { GenerationResult, HistoryItem } from '../types';
 
 const HISTORY_KEY = 'gemini-image-generator-history';
 
 /**
+ * Extracts a user-friendly error message from various error formats.
+ * This is updated to provide more detail for unexpected error structures.
+ */
+export function getErrorMessage(error: any): string {
+  if (!error) return 'An unknown error occurred.';
+
+  // Gemini API error structure from fetch: { error: { message: "..." } }
+  const errorDetails = error.error || error;
+  if (typeof errorDetails === 'object' && !Array.isArray(errorDetails) && errorDetails.message) {
+      return errorDetails.message;
+  }
+  
+  if (typeof error === 'string') {
+    return error;
+  }
+  
+  // As a fallback, try to stringify the error object for the UI.
+  try {
+    const stringifiedError = JSON.stringify(error);
+    if (stringifiedError !== '{}') { // Avoid returning an empty object string
+        return stringifiedError;
+    }
+  } catch (e) {
+    // Cannot be stringified
+  }
+  
+  return 'An unknown error occurred. Check the console for details.';
+}
+
+
+/**
  * Checks if an error object indicates a rate limit error from the API.
+ * This is updated to handle the raw fetch JSON error object.
  */
 function isRateLimitError(error: any): boolean {
-  if (error instanceof Error) {
-    const message = error.message.toLowerCase();
-    return message.includes('quota') || message.includes('rate limit');
+  if (!error) return false;
+
+  const details = error.error || error; 
+  if (details?.status === 'RESOURCE_EXHAUSTED' || details?.code === 429) {
+    return true;
   }
-  return false;
+
+  const message = getErrorMessage(error).toLowerCase();
+  
+  return message.includes('quota') || message.includes('rate limit') || message.includes('resource exhausted');
 }
 
 /**
- * Generates a set of images for a single prompt using a specific API key.
- * This has been optimized to make a single API call for all requested images.
+ * Checks if the error is due to a blocked prompt.
+ */
+export function isPromptError(error: any): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('prompt is not allowed') || message.includes('prompt was blocked');
+}
+
+
+/**
+ * Generates a set of images for a single prompt using a direct `fetch` call to the Gemini REST API.
+ * This bypasses the @google/genai SDK to ensure the correct API key is always used via the `x-goog-api-key` header.
  */
 export async function generateImages(prompt: string, apiKey: string, numImages: number): Promise<string[]> {
-  const ai = new GoogleGenAI({ apiKey });
-  
-  const response = await ai.models.generateImages({
-    model: 'imagen-4.0-generate-001',
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error('A valid API key must be provided to generate images.');
+  }
+
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:generateImages';
+
+  const payload = {
     prompt: prompt,
     config: {
       numberOfImages: numImages,
       outputMimeType: 'image/jpeg',
       aspectRatio: '1:1',
     },
-  });
+  };
 
-  return response.generatedImages.map(img => img.image.imageBytes);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify(payload),
+      credentials: 'omit', // Prevent browser from sending auth cookies/headers, forcing use of api-key
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error('Gemini API Error Response:', data);
+      throw data; // Throw the JSON error object for parsing by the UI
+    }
+    
+    if (!data.generatedImages || !Array.isArray(data.generatedImages)) {
+      console.error('Invalid success response format:', data);
+      throw new Error("Invalid response format from API. Expected 'generatedImages' array.");
+    }
+
+    return data.generatedImages.map((img: any) => img.image.imageBytes);
+
+  } catch (error) {
+    // If fetch fails (network error) or if response isn't JSON, it won't have the 'error' property
+    if (error instanceof Error && !('error' in (error as object))) {
+        console.error('Fetch/Network Error:', error);
+        throw new Error(`Failed to call the Gemini API. Please check your network connection or console for details.`);
+    }
+    // Re-throw API errors to be handled by the UI logic
+    throw error;
+  }
 }
 
 
@@ -87,17 +168,32 @@ export function saveHistory(history: HistoryItem[]): void {
   }
 }
 
-export function addToHistory(newResults: GenerationResult[]): HistoryItem[] {
+/**
+ * Creates a new history item or updates an existing one for a given session.
+ * This is used to save progress incrementally.
+ */
+export function updateHistory(sessionId: string, newResults: GenerationResult[]): HistoryItem[] {
     const currentHistory = loadHistory();
-    const newItem: HistoryItem = {
-      id: new Date().toISOString(),
-      date: new Date().toLocaleString(),
-      results: newResults,
-    };
-    const updatedHistory = [newItem, ...currentHistory];
+    const itemIndex = currentHistory.findIndex(item => item.id === sessionId);
+    let updatedHistory;
+
+    if (itemIndex > -1) {
+        // Update existing item in the history array
+        updatedHistory = [...currentHistory];
+        updatedHistory[itemIndex].results = newResults;
+    } else {
+        // Create a new history item
+        const newItem: HistoryItem = {
+            id: sessionId,
+            date: new Date().toLocaleString(),
+            results: newResults,
+        };
+        updatedHistory = [newItem, ...currentHistory];
+    }
     saveHistory(updatedHistory);
     return updatedHistory;
 }
+
 
 export function deleteHistoryItem(id: string): HistoryItem[] {
     const currentHistory = loadHistory();

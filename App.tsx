@@ -1,10 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
 import { Page, ApiKey, ApiKeyStatus, HistoryItem, GenerationResult } from './types';
 import { GeneratorPage } from './components/GeneratorPage';
 import { HistoryPage } from './components/HistoryPage';
 import { Icon } from './components/Icons';
-import { loadHistory, addToHistory, deleteHistoryItem, clearHistory } from './services/apiService';
+import { loadHistory, updateHistory, deleteHistoryItem, clearHistory } from './services/apiService';
 
 const API_KEYS_STORAGE_KEY = 'gemini-api-keys';
 
@@ -76,9 +75,9 @@ function App() {
     updateApiKeys(apiKeys.map(k => k.key === key ? { ...k, status } : k));
   };
   
-  const handleGenerationComplete = (results: GenerationResult[]) => {
+  const handleGenerationUpdate = (sessionId: string, results: GenerationResult[]) => {
     if (results.some(r => r.images.length > 0)) {
-       const updatedHistory = addToHistory(results);
+       const updatedHistory = updateHistory(sessionId, results);
        setHistory(updatedHistory);
     }
   }
@@ -103,7 +102,7 @@ function App() {
             addApiKey={addApiKey} 
             removeApiKey={removeApiKey} 
             updateApiKeyStatus={updateApiKeyStatus}
-            onGenerationComplete={handleGenerationComplete}
+            onGenerationUpdate={handleGenerationUpdate}
           />
         )}
         {page === 'history' && <HistoryPage history={history} onDeleteItem={handleDeleteHistoryItem} onClearHistory={handleClearHistory} />}
