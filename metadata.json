@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Bulk Image Generator",
+  "description": "A powerful application to generate multiple images from a list of text prompts using Gemini. Features include multi-API key support for rate limiting, bulk and single image downloads, and a local history of all your generations.",
+  "requestFramePermissions": []
+}
